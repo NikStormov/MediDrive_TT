@@ -1,5 +1,3 @@
-overdone
-
 # Terraform
 **/.terraform/*
 *.tfstate
