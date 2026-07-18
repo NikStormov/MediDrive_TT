@@ -1,3 +1,4 @@
+# https://docs.cloud.google.com/secret-manager/docs/secret-manager-managed-csi-component
 # Dedicated GSA for GKE nodes. Nodes only need the minimum scopes to ship
 # logs/metrics and pull images from Artifact Registry — application-level
 # GCP access (e.g. Secret Manager) is granted per-Kubernetes-ServiceAccount

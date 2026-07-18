@@ -2,7 +2,6 @@
 
 This file consolidates the three buggy-snippet reviews required by `task-1 SRE.md`:
 **5 Terraform issues + 5 Kubernetes manifest issues + 4 CI/CD pipeline issues.**
-(Earlier working drafts are kept in `REVIEW PART 1.md` / `REVIEW PART 2.md` / `REVIEW PART 3.md` for reference; this file is the final, complete submission.)
 
 ---
 

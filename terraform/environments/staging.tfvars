@@ -5,8 +5,8 @@ environment = "staging"
 # CI runner / VPN egress ranges allowed to reach the GKE API server.
 master_authorized_cidrs = [
   {
-    cidr_block   = "45.148.148.42/32"
-    display_name = "admin-static-ip"
+    cidr_block   = "8.8.8.8/32"
+    display_name = "static-ip"
   },
 ]
 
