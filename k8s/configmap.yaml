@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-service-config
+  namespace: order-service
+data:
+  PORT: "8080"
+  LOG_LEVEL: "info"
+  REQUEST_TIMEOUT_MS: "3000"
+  BILLING_API_BASE_URL: "https://billing.internal.example.com"
+  DB_MAX_OPEN_CONNS: "20"
+  DB_MAX_IDLE_CONNS: "5"

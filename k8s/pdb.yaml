@@ -1,0 +1,14 @@
+# maxUnavailable: 1 ensures a voluntary disruption (node drain during a GKE
+# upgrade, cluster autoscaler scale-down, `kubectl drain`) can only take down
+# one pod at a time regardless of the current HPA-driven replica count
+# (3-15), keeping the service available throughout maintenance.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: order-service
+  namespace: order-service
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: order-service

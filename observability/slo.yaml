@@ -1,0 +1,111 @@
+# Prometheus recording rules implementing the SLOs for order-service.
+#
+# Assumed application metrics (exposed by the Go service via the
+# prometheus client library):
+#   - http_requests_total{job="order-service", code="200"|"500"|...}
+#   - http_request_duration_seconds_bucket{job="order-service", le="..."}
+#   - http_request_duration_seconds_count{job="order-service"}
+#
+# Recording rules are pre-aggregated at multiple windows (5m/1h/6h/30d) so
+# that both dashboards and alerting rules (alerts.yaml) can reference cheap,
+# already-computed series instead of re-running expensive range queries.
+groups:
+  - name: order-service-slo-availability
+    interval: 30s
+    rules:
+      # --- Short window (5m) — used for fast burn-rate confirmation ---
+      - record: order_service:requests_total:rate5m
+        expr: sum(rate(http_requests_total{job="order-service"}[5m]))
+
+      - record: order_service:requests_errors_total:rate5m
+        expr: sum(rate(http_requests_total{job="order-service",code=~"5.."}[5m]))
+
+      - record: order_service:availability_error_ratio:rate5m
+        expr: order_service:requests_errors_total:rate5m / order_service:requests_total:rate5m
+
+      # --- 1h window — the window used by the burn-rate SLO/alert ---
+      - record: order_service:requests_total:rate1h
+        expr: sum(rate(http_requests_total{job="order-service"}[1h]))
+
+      - record: order_service:requests_errors_total:rate1h
+        expr: sum(rate(http_requests_total{job="order-service",code=~"5.."}[1h]))
+
+      - record: order_service:availability_error_ratio:rate1h
+        expr: order_service:requests_errors_total:rate1h / order_service:requests_total:rate1h
+
+      # --- 6h window — secondary confirmation window, reduces noise ---
+      - record: order_service:requests_total:rate6h
+        expr: sum(rate(http_requests_total{job="order-service"}[6h]))
+
+      - record: order_service:requests_errors_total:rate6h
+        expr: sum(rate(http_requests_total{job="order-service",code=~"5.."}[6h]))
+
+      - record: order_service:availability_error_ratio:rate6h
+        expr: order_service:requests_errors_total:rate6h / order_service:requests_total:rate6h
+
+      # --- 30-day rolling window — the SLO measurement window itself ---
+      - record: order_service:availability_error_ratio:rate30d
+        expr: sum(rate(http_requests_total{job="order-service",code=~"5.."}[30d])) / sum(rate(http_requests_total{job="order-service"}[30d]))
+
+      # Availability SLI = 1 - error ratio. Target: >= 0.999 (99.9%).
+      - record: order_service:availability_sli:ratio30d
+        expr: 1 - order_service:availability_error_ratio:rate30d
+
+      # Error budget remaining, as a fraction of the total 0.1% budget.
+      # 1.0 = full budget available, 0.0 = fully exhausted, negative = SLO breached.
+      - record: order_service:availability_error_budget_remaining:ratio30d
+        expr: 1 - (order_service:availability_error_ratio:rate30d / (1 - 0.999))
+
+      # --- Error budget burn rate ---
+      # burn_rate = observed_error_ratio / allowed_error_ratio
+      # allowed_error_ratio (budget) = 1 - SLO target = 1 - 0.999 = 0.001
+      # burn_rate == 1  -> consuming budget at exactly the sustainable rate (exhausts in 30d)
+      # burn_rate == 5  -> consuming budget 5x faster (would exhaust the 30d budget in 6 days)
+      - record: order_service:availability_burn_rate:5m
+        expr: order_service:availability_error_ratio:rate5m / (1 - 0.999)
+
+      - record: order_service:availability_burn_rate:1h
+        expr: order_service:availability_error_ratio:rate1h / (1 - 0.999)
+
+      - record: order_service:availability_burn_rate:6h
+        expr: order_service:availability_error_ratio:rate6h / (1 - 0.999)
+
+  - name: order-service-slo-latency
+    interval: 30s
+    rules:
+      # Fraction of requests completing within the 500ms latency target.
+      # le="0.5" bucket is cumulative (includes everything <= 500ms).
+      - record: order_service:requests_fast_total:rate5m
+        expr: sum(rate(http_request_duration_seconds_bucket{job="order-service",le="0.5"}[5m]))
+
+      - record: order_service:requests_duration_count:rate5m
+        expr: sum(rate(http_request_duration_seconds_count{job="order-service"}[5m]))
+
+      - record: order_service:latency_fast_ratio:rate5m
+        expr: order_service:requests_fast_total:rate5m / order_service:requests_duration_count:rate5m
+
+      - record: order_service:latency_error_ratio:rate5m
+        expr: 1 - order_service:latency_fast_ratio:rate5m
+
+      - record: order_service:requests_fast_total:rate1h
+        expr: sum(rate(http_request_duration_seconds_bucket{job="order-service",le="0.5"}[1h]))
+
+      - record: order_service:requests_duration_count:rate1h
+        expr: sum(rate(http_request_duration_seconds_count{job="order-service"}[1h]))
+
+      - record: order_service:latency_fast_ratio:rate1h
+        expr: order_service:requests_fast_total:rate1h / order_service:requests_duration_count:rate1h
+
+      # 30-day rolling latency SLI. Target: >= 0.95 (95% under 500ms).
+      - record: order_service:latency_fast_ratio:ratio30d
+        expr: sum(rate(http_request_duration_seconds_bucket{job="order-service",le="0.5"}[30d])) / sum(rate(http_request_duration_seconds_count{job="order-service"}[30d]))
+
+      # p50 / p95 / p99 latency, used directly by alerts and the dashboard.
+      - record: order_service:latency_p50:rate5m
+        expr: histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{job="order-service"}[5m])) by (le))
+
+      - record: order_service:latency_p95:rate5m
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="order-service"}[5m])) by (le))
+
+      - record: order_service:latency_p99:rate10m
+        expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job="order-service"}[10m])) by (le))

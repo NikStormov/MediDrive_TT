@@ -1,0 +1,117 @@
+# Replica count and resource sizing rationale: see ANSWERS.md.
+# Summary: baseline 6 replicas (HPA range 3-15) sized so that, combined with
+# the 250m CPU request per pod, the service can absorb ~5,000 req/min peak
+# plus a node/AZ failure without breaching the latency SLO.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: order-service
+  labels:
+    app: order-service
+spec:
+  replicas: 6
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: order-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable: 0 guarantees full capacity is retained throughout
+      # the rollout (zero downtime); maxSurge adds temporary extra capacity
+      # instead of removing existing pods first.
+      maxUnavailable: 0
+      maxSurge: 25%
+  template:
+    metadata:
+      labels:
+        app: order-service
+    spec:
+      serviceAccountName: order-service
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: order-service
+      containers:
+        - name: order-service
+          image: us-central1-docker.pkg.dev/PROJECT_ID/order-service/order-service:REPLACED_BY_CI_GIT_SHA
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: order-service-config
+          env:
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-db-credentials
+                  key: DB_USERNAME
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-db-credentials
+                  key: DB_PASSWORD
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-db-credentials
+                  key: DB_HOST
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: order-service-db-credentials
+                  key: DB_NAME
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              # Deliberately no CPU limit — see ANSWERS.md Q6: a hard CPU
+              # limit causes CFS-quota throttling (added latency) even when
+              # average usage is below the limit, without proportionally
+              # preventing noisy-neighbor issues on a shared node the way a
+              # CPU *request* + kube-scheduler bin-packing already does.
+              # Memory has no compressible equivalent, so a memory limit is
+              # still set to protect co-located pods via OOM-kill isolation.
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30 # allow up to ~2.5 min for cold start (DB pool init, billing API handshake)
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          volumeMounts:
+            - name: db-credentials
+              mountPath: "/mnt/secrets-store"
+              readOnly: true
+      volumes:
+        - name: db-credentials
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: order-service-db-credentials

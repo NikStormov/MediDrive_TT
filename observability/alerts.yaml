@@ -1,0 +1,88 @@
+groups:
+  - name: order-service-alerts
+    rules:
+      # 1. Sustained error rate > 1% for 5 minutes.
+      - alert: HighErrorRate
+        expr: order_service:availability_error_ratio:rate5m > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          team: order-service
+        annotations:
+          summary: "order-service error rate above 1% ({{ $value | humanizePercentage }})"
+          description: >-
+            The proportion of non-5xx-failing requests to order-service has
+            been below 99% for at least 5 minutes (current error ratio:
+            {{ $value | humanizePercentage }}). This directly burns the
+            99.9% availability SLO error budget.
+          runbook_url: "https://github.com/<org>/<repo>/blob/main/runbooks/high-error-rate.md"
+
+      # 2. p99 latency > 1s sustained for 10 minutes.
+      - alert: HighP99Latency
+        expr: order_service:latency_p99:rate10m > 1
+        for: 10m
+        labels:
+          severity: warning
+          team: order-service
+        annotations:
+          summary: "order-service p99 latency above 1s ({{ $value }}s)"
+          description: >-
+            p99 request latency has been above 1 second for at least 10
+            minutes (current: {{ $value }}s). This risks breaching the 95%
+            < 500ms latency SLO even if it hasn't yet.
+          runbook_url: "https://github.com/<org>/<repo>/blob/main/runbooks/high-error-rate.md"
+
+      # 3. Error budget burn rate > 5x over a 1-hour window.
+      # Confirmed against the 5m window too (standard multi-window
+      # technique) to avoid paging on a single noisy scrape interval while
+      # still firing well within the 1h window called out in the spec.
+      - alert: ErrorBudgetBurnRateHigh
+        expr: >-
+          order_service:availability_burn_rate:1h > 5
+          and
+          order_service:availability_burn_rate:5m > 5
+        for: 2m
+        labels:
+          severity: critical
+          team: order-service
+        annotations:
+          summary: "order-service burning error budget at {{ $value | printf \"%.1f\" }}x over 1h"
+          description: >-
+            At a sustained 5x burn rate, the 30-day / 43-minute error budget
+            is consumed in ~6 days; at higher multiples it is consumed within
+            hours. Current 1h burn rate: {{ $value | printf "%.1f" }}x.
+            See ANSWERS.md Q5 for the exhaustion-time calculation.
+          runbook_url: "https://github.com/<org>/<repo>/blob/main/runbooks/high-error-rate.md"
+
+      # 4. Any pod crash-looping (> 3 restarts in 15 minutes).
+      - alert: PodCrashLooping
+        expr: increase(kube_pod_container_status_restarts_total{namespace="order-service"}[15m]) > 3
+        for: 0m
+        labels:
+          severity: warning
+          team: order-service
+        annotations:
+          summary: "Pod {{ $labels.pod }} is crash-looping"
+          description: >-
+            Container {{ $labels.container }} in pod {{ $labels.pod }}
+            (namespace {{ $labels.namespace }}) has restarted more than 3
+            times in the last 15 minutes.
+          runbook_url: "https://github.com/<org>/<repo>/blob/main/runbooks/high-error-rate.md"
+
+      # 5. Database connection pool near exhaustion (< 10% available) for 5m.
+      # Assumes the app exposes db_pool_open_connections / db_pool_max_connections
+      # gauges (standard database/sql stats exported via prometheus client).
+      - alert: DBConnectionPoolNearExhaustion
+        expr: >-
+          (1 - (sum(db_pool_open_connections{job="order-service"}) / sum(db_pool_max_connections{job="order-service"}))) < 0.10
+        for: 5m
+        labels:
+          severity: critical
+          team: order-service
+        annotations:
+          summary: "order-service DB connection pool near exhaustion ({{ $value | humanizePercentage }} free)"
+          description: >-
+            Fewer than 10% of database connections are available for at
+            least 5 minutes. This typically precedes request timeouts and
+            5xx errors as connections queue up waiting for the pool.
+          runbook_url: "https://github.com/<org>/<repo>/blob/main/runbooks/high-error-rate.md"

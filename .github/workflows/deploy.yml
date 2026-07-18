@@ -1,0 +1,270 @@
+name: Deploy order-service
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Prevent concurrent terraform applies / concurrent deploys to the same
+# environment from racing each other.
+concurrency:
+  group: order-service-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: "1.22"
+  GCP_REGION: us-central1
+  ARTIFACT_REGISTRY: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/order-service
+  IMAGE_NAME: order-service
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write # required for keyless Workload Identity Federation auth to GCP
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Lint + test (race detector enabled) — runs on every PR and push.
+  # ---------------------------------------------------------------------
+  lint-test:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+      - name: Test (race detector)
+        run: go test -race -shuffle=on -covermode=atomic -coverprofile=coverage.out ./...
+
+  # ---------------------------------------------------------------------
+  # 2. Build & push image — tagged with the git SHA, never `latest`.
+  #    Runs for both PRs (build-only, validates the Dockerfile) and pushes
+  #    to main (build + push to Artifact Registry).
+  # ---------------------------------------------------------------------
+  build-and-push:
+    name: Build & push image
+    needs: lint-test
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: vars
+        run: echo "image_tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        if: github.event_name == 'push'
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.CI_DEPLOYER_SA }}
+
+      - name: Configure Docker for Artifact Registry
+        if: github.event_name == 'push'
+        run: gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+
+      - name: Build image
+        run: |
+          docker build \
+            -t ${ARTIFACT_REGISTRY}/${IMAGE_NAME}:${{ steps.vars.outputs.image_tag }} \
+            .
+
+      - name: Push image
+        if: github.event_name == 'push'
+        run: docker push ${ARTIFACT_REGISTRY}/${IMAGE_NAME}:${{ steps.vars.outputs.image_tag }}
+
+  # ---------------------------------------------------------------------
+  # 3. terraform plan — every PR, posts the plan as a PR comment.
+  # ---------------------------------------------------------------------
+  terraform-plan:
+    name: Terraform plan (staging)
+    if: github.event_name == 'pull_request'
+    needs: lint-test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.CI_DEPLOYER_SA }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: terraform init
+        run: terraform init -backend-config=environments/staging.backend.hcl
+
+      - name: terraform plan
+        id: plan
+        run: |
+          terraform plan -var-file=environments/staging.tfvars -out=tfplan -no-color
+          terraform show -no-color tfplan > plan_output.txt
+        continue-on-error: true
+
+      - name: Post plan as PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('terraform/plan_output.txt', 'utf8').slice(0, 60000);
+            const body = `#### Terraform Plan (staging)\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n</details>`;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Fail if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  # ---------------------------------------------------------------------
+  # 4. terraform apply — merge to main only, gated by manual approval via
+  #    the `infrastructure` GitHub Environment (configure required
+  #    reviewers on that environment in repo settings).
+  # ---------------------------------------------------------------------
+  terraform-apply:
+    name: Terraform apply
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: infrastructure-approval
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.CI_DEPLOYER_SA }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: terraform init
+        run: terraform init -backend-config=environments/staging.backend.hcl
+
+      - name: terraform apply
+        run: terraform apply -var-file=environments/staging.tfvars -auto-approve
+
+  # ---------------------------------------------------------------------
+  # 5. Deploy to staging — waits for rollout to complete.
+  # ---------------------------------------------------------------------
+  deploy-staging:
+    name: Deploy to staging
+    needs: [build-and-push, terraform-apply]
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.CI_DEPLOYER_SA }}
+
+      - uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: order-service-cluster-staging
+          location: ${{ env.GCP_REGION }}
+
+      - name: Apply manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/secret.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/pdb.yaml
+          kubectl apply -f k8s/hpa.yaml
+          kubectl set image deployment/order-service \
+            order-service=${{ env.ARTIFACT_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image_tag }} \
+            -n order-service --record=false || kubectl apply -f k8s/deployment.yaml
+
+      - name: Wait for rollout to complete
+        run: kubectl rollout status deployment/order-service -n order-service --timeout=5m
+
+  # ---------------------------------------------------------------------
+  # 6. Smoke test staging — only proceeds to production if this passes.
+  # ---------------------------------------------------------------------
+  smoke-test:
+    name: Smoke test (staging)
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check /healthz
+        run: |
+          curl -sf --retry 5 --retry-delay 5 https://staging.order-service.internal/healthz
+
+      - name: Check /readyz
+        run: |
+          curl -sf --retry 5 --retry-delay 5 https://staging.order-service.internal/readyz
+
+  # ---------------------------------------------------------------------
+  # 7. Deploy to production — manual approval gate via the `production`
+  #    GitHub Environment, with automatic rollback on failure.
+  # ---------------------------------------------------------------------
+  deploy-production:
+    name: Deploy to production
+    needs: [build-and-push, smoke-test]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.CI_DEPLOYER_SA }}
+
+      - uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: order-service-cluster-production
+          location: ${{ env.GCP_REGION }}
+
+      - name: Apply manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml
+          kubectl apply -f k8s/secret.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/pdb.yaml
+          kubectl apply -f k8s/hpa.yaml
+          kubectl set image deployment/order-service \
+            order-service=${{ env.ARTIFACT_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.build-and-push.outputs.image_tag }} \
+            -n order-service --record=false || kubectl apply -f k8s/deployment.yaml
+
+      - name: Wait for rollout to complete
+        id: rollout
+        run: kubectl rollout status deployment/order-service -n order-service --timeout=5m
+
+      - name: Post-deploy smoke test
+        id: prod_smoke
+        run: |
+          curl -sf --retry 5 --retry-delay 5 https://order-service.internal/healthz
+          curl -sf --retry 5 --retry-delay 5 https://order-service.internal/readyz
+
+      - name: Automatic rollback on failure
+        if: failure() && (steps.rollout.outcome == 'failure' || steps.prod_smoke.outcome == 'failure')
+        run: |
+          echo "Production deploy/verification failed — rolling back to previous revision."
+          kubectl rollout undo deployment/order-service -n order-service
+          kubectl rollout status deployment/order-service -n order-service --timeout=5m
