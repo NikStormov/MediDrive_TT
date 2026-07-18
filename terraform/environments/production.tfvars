@@ -5,12 +5,8 @@ environment = "production"
 # CI runner / VPN egress ranges allowed to reach the GKE API server.
 master_authorized_cidrs = [
   {
-    cidr_block   = "203.0.113.0/28"
-    display_name = "ci-runner-egress"
-  },
-  {
-    cidr_block   = "198.51.100.0/28"
-    display_name = "office-vpn"
+    cidr_block   = "45.148.148.42/32"
+    display_name = "admin-static-ip"
   },
 ]
 

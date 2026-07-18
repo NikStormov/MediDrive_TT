@@ -13,8 +13,16 @@ override.tf.json
 *_override.tf.json
 .terraformrc
 terraform.rc
+.terraform.lock.hcl
 
 # Editor / OS
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Go
+/order-service
+/MediDrive_TT.exe
+*.exe
+*.test
+coverage.out
