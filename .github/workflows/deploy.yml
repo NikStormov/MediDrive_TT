@@ -182,6 +182,28 @@ jobs:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.CI_DEPLOYER_SA }}
 
+      # The GKE control plane is private with a restricted
+      # master-authorized-networks allow-list (see terraform/environments).
+      # GitHub-hosted runners have dynamic IPs, so we temporarily add just
+      # this runner's IP for the duration of the job, then always revert it
+      # — never a static/broad GitHub IP range (see REVIEW.md/ANSWERS.md on
+      # why 0.0.0.0/0-style ranges are unacceptable here).
+      - name: Snapshot current authorized networks
+        id: current_networks
+        run: |
+          CIDRS=$(gcloud container clusters describe order-service-cluster-staging \
+            --region ${{ env.GCP_REGION }} --format=json \
+            | jq -r '[.masterAuthorizedNetworksConfig.cidrBlocks[].cidrBlock] | join(",")')
+          echo "cidrs=$CIDRS" >> "$GITHUB_OUTPUT"
+
+      - name: Temporarily allow this runner on the GKE control plane
+        run: |
+          RUNNER_IP=$(curl -sf https://api.ipify.org)
+          gcloud container clusters update order-service-cluster-staging \
+            --region ${{ env.GCP_REGION }} \
+            --enable-master-authorized-networks \
+            --master-authorized-networks="${{ steps.current_networks.outputs.cidrs }},$RUNNER_IP/32"
+
       - uses: google-github-actions/get-gke-credentials@v2
         with:
           cluster_name: order-service-cluster-staging
@@ -201,6 +223,14 @@ jobs:
 
       - name: Wait for rollout to complete
         run: kubectl rollout status deployment/order-service -n order-service --timeout=5m
+
+      - name: Revert authorized networks (remove runner IP)
+        if: always()
+        run: |
+          gcloud container clusters update order-service-cluster-staging \
+            --region ${{ env.GCP_REGION }} \
+            --enable-master-authorized-networks \
+            --master-authorized-networks="${{ steps.current_networks.outputs.cidrs }}"
 
   # ---------------------------------------------------------------------
   # 6. Smoke test staging — only proceeds to production if this passes.
@@ -235,6 +265,24 @@ jobs:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
           service_account: ${{ secrets.CI_DEPLOYER_SA }}
 
+      # Same ephemeral-allowlist pattern as deploy-staging — see that job
+      # for the rationale.
+      - name: Snapshot current authorized networks
+        id: current_networks
+        run: |
+          CIDRS=$(gcloud container clusters describe order-service-cluster-production \
+            --region ${{ env.GCP_REGION }} --format=json \
+            | jq -r '[.masterAuthorizedNetworksConfig.cidrBlocks[].cidrBlock] | join(",")')
+          echo "cidrs=$CIDRS" >> "$GITHUB_OUTPUT"
+
+      - name: Temporarily allow this runner on the GKE control plane
+        run: |
+          RUNNER_IP=$(curl -sf https://api.ipify.org)
+          gcloud container clusters update order-service-cluster-production \
+            --region ${{ env.GCP_REGION }} \
+            --enable-master-authorized-networks \
+            --master-authorized-networks="${{ steps.current_networks.outputs.cidrs }},$RUNNER_IP/32"
+
       - uses: google-github-actions/get-gke-credentials@v2
         with:
           cluster_name: order-service-cluster-production
@@ -268,3 +316,11 @@ jobs:
           echo "Production deploy/verification failed — rolling back to previous revision."
           kubectl rollout undo deployment/order-service -n order-service
           kubectl rollout status deployment/order-service -n order-service --timeout=5m
+
+      - name: Revert authorized networks (remove runner IP)
+        if: always()
+        run: |
+          gcloud container clusters update order-service-cluster-production \
+            --region ${{ env.GCP_REGION }} \
+            --enable-master-authorized-networks \
+            --master-authorized-networks="${{ steps.current_networks.outputs.cidrs }}"
