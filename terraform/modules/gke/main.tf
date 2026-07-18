@@ -33,11 +33,17 @@ resource "google_service_account" "workload_identity_app" {
 resource "google_binary_authorization_policy" "default" {
   project = var.project_id
 
+  # NOTE: evaluation_mode is ALWAYS_ALLOW rather than REQUIRE_ATTESTATION
+  # because no attestor is provisioned yet (there is no signing/attestation
+  # pipeline in this CI setup). REQUIRE_ATTESTATION with an empty
+  # require_attestations_by list is rejected by the API ("evaluation mode
+  # requires at least one require_attestations_by but none is present").
+  # This resource keeps Binary Authorization enabled and wired to the
+  # cluster so that adding a real attestor later is a policy-only change,
+  # not a new integration.
   default_admission_rule {
-    evaluation_mode  = "REQUIRE_ATTESTATION"
+    evaluation_mode  = "ALWAYS_ALLOW"
     enforcement_mode = "ENFORCED_BLOCK_AND_AUDIT_LOG"
-
-    require_attestations_by = []
   }
 
   # Google-built system images (kube-system components) are exempt so the
