@@ -91,44 +91,6 @@ resource "google_container_cluster" "primary" {
     }
   }
 
-  workload_identity_config {
-    workload_pool = "${var.project_id}.svc.id.goog"
-  }
-
-  binary_authorization {
-    evaluation_mode = "PROJECT_SINGLETON_POLICY_ENFORCE"
-  }
-
-  release_channel {
-    channel = var.release_channel
-  }
-
-  maintenance_policy {
-    daily_maintenance_window {
-      start_time = "02:00" # low-traffic window, UTC
-    }
-  }
-
-  vertical_pod_autoscaling {
-    enabled = true
-  }
-
-  logging_config {
-    enable_components = ["SYSTEM_COMPONENTS", "WORKLOADS"]
-  }
-  monitoring_config {
-    enable_components = ["SYSTEM_COMPONENTS", "WORKLOADS"]
-    managed_prometheus {
-      enabled = true
-    }
-  }
-
-  addons_config {
-    horizontal_pod_autoscaling { disabled = false }
-    http_load_balancing        { disabled = false }
-    gce_persistent_disk_csi_driver_config { enabled = true }
-  }
-
   depends_on = [
     google_binary_authorization_policy.default,
   ]
